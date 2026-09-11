@@ -361,7 +361,7 @@ export default function MockInterview() {
     const apiMessages = [...conversationHistoryRef.current, userMsg];
 
     const response = await fetch(
-      "http://localhost:3001/api/chat",
+      "https://speakwiseai-ai-interview-platform.onrender.com/api/chat",
       {
         method: "POST",
         headers: {

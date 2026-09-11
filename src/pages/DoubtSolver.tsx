@@ -979,7 +979,7 @@ function DoubtSolver() {
       /* -------------------------------------------------------------- */
 
       const response = await fetch(
-           "http://localhost:3001/api/chat",
+           "https://speakwiseai-ai-interview-platform.onrender.com/api/chat",
         {
           method: "POST",
 
