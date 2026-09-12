@@ -363,8 +363,17 @@ Do not make the response unnecessarily long.
    SCORE REGEX
 --------------------------------------------------- */
 
-export const SCORE_REGEX =
-  /<<<SCORES\s+communication=(\d+)\s+clarity=(\d+)\s+confidence=(\d+)\s+overall=(\d+)>>>/i;
+/* ---------------------------------------------------
+   SCORE BLOCK MATCHER (loose on formatting inside)
+--------------------------------------------------- */
+
+const SCORE_BLOCK_REGEX = /<<<SCORES[\s\S]*?>>>/i;
+
+function extractField(block: string, field: string): number | null {
+  const match = block.match(new RegExp(`${field}\\D{0,5}(\\d{1,3})`, "i"));
+  if (!match) return null;
+  return Math.max(0, Math.min(10, parseInt(match[1], 10)));
+}
 
 /* ---------------------------------------------------
    EXTRACT SCORES
@@ -379,35 +388,49 @@ export function extractScores(text: string): {
     overall: number;
   } | null;
 } {
-  const match = text.match(SCORE_REGEX);
+  const blockMatch = text.match(SCORE_BLOCK_REGEX);
 
-  if (!match) {
+  if (!blockMatch) {
+    console.warn(
+      "extractScores: no <<<SCORES ...>>> block found in AI response.",
+    );
     return {
       cleaned: text.trim(),
       scores: null,
     };
   }
 
-  const cleaned = text.replace(SCORE_REGEX, "").trimEnd();
+  const block = blockMatch[0];
+  const cleaned = text.replace(SCORE_BLOCK_REGEX, "").trimEnd();
 
-  const [, communication, clarity, confidence, overall] = match;
+  const communication = extractField(block, "communication");
+  const clarity = extractField(block, "clarity");
+  const confidence = extractField(block, "confidence");
+  const overall = extractField(block, "overall");
 
-  const scores = {
-    communication: Math.max(0, Math.min(10, parseInt(communication, 10))),
+  if (
+    communication === null ||
+    clarity === null ||
+    confidence === null ||
+    overall === null
+  ) {
+    console.warn(
+      "extractScores: found a SCORES block but couldn't parse all four numbers:",
+      block,
+    );
+    return {
+      cleaned,
+      scores: null,
+    };
+  }
 
-    clarity: Math.max(0, Math.min(10, parseInt(clarity, 10))),
-
-    confidence: Math.max(0, Math.min(10, parseInt(confidence, 10))),
-
-    overall: Math.max(0, Math.min(10, parseInt(overall, 10))),
-  };
+  const scores = { communication, clarity, confidence, overall };
 
   /*
     If the model returns all zeros,
     it means the student has not yet
     provided an answer to evaluate.
   */
-
   if (
     scores.communication === 0 &&
     scores.clarity === 0 &&

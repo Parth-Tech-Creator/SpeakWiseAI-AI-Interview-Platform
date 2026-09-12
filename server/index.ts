@@ -416,7 +416,7 @@ Output only the answer intended for the user.
       try {
         const gemini = createGeminiProvider(process.env.GEMINI_API_KEY);
 
-        success = await tryProvider("Gemini", gemini("gemini-2.5-flash"), 0.9);
+        success = await tryProvider("Gemini", gemini("gemini-3.6-flash"), 0.9);
       } catch (error) {
         lastError = error;
 
