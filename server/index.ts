@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 
-import { streamText, type ModelMessage } from "ai";
+import { streamText, generateText, type ModelMessage } from "ai";
 
 import { createClient } from "@supabase/supabase-js";
 
@@ -511,11 +511,120 @@ Output only the answer intended for the user.
 
     const cleanedAiResponse = cleanAiResponse(fullAiResponse);
 
-    /* ---------------------------------------------------
-   EXTRACT SCORES
+        /* ---------------------------------------------------
+   CLEAN RESPONSE (no hidden tag anymore, just trim)
 --------------------------------------------------- */
 
-    const { cleaned, scores } = extractScores(cleanedAiResponse);
+    const cleaned = cleanedAiResponse.trim();
+
+    /* ---------------------------------------------------
+   SCORE VIA A SEPARATE, DEDICATED CALL
+   (feature === "interview" | "communication" only)
+--------------------------------------------------- */
+
+    async function getScoresViaSeparateCall(feedbackText: string): Promise<{
+      communication: number;
+      clarity: number;
+      confidence: number;
+      overall: number;
+    } | null> {
+      const scoringPrompt = `A coach wrote this feedback for a student's spoken answer:
+
+"""
+${feedbackText}
+"""
+
+Based only on this feedback, output a single JSON object with four integer scores from 0 to 10: communication, clarity, confidence, overall. If the feedback indicates the student gave no real answer yet, use 0 for all four. Output ONLY the JSON object, nothing else, no markdown, no code fences.`;
+
+      const attempts: Array<() => Promise<string>> = [];
+
+      if (process.env.GEMINI_API_KEY) {
+        const gemini = createGeminiProvider(process.env.GEMINI_API_KEY);
+        attempts.push(async () => {
+          const { text } = await generateText({
+            model: gemini("gemini-3.6-flash"),
+            prompt: scoringPrompt,
+            temperature: 0.1,
+          });
+          return text;
+        });
+      }
+
+      if (process.env.GROQ_API_KEY) {
+        const groq = createGroqProvider(process.env.GROQ_API_KEY);
+        attempts.push(async () => {
+          const { text } = await generateText({
+            model: groq("openai/gpt-oss-20b"),
+            prompt: scoringPrompt,
+            temperature: 0.1,
+          });
+          return text;
+        });
+      }
+
+      if (process.env.CEREBRAS_API_KEY) {
+        const cerebras = createCerebrasProvider(process.env.CEREBRAS_API_KEY);
+        attempts.push(async () => {
+          const { text } = await generateText({
+            model: cerebras("gpt-oss-120b"),
+            prompt: scoringPrompt,
+            temperature: 0.1,
+          });
+          return text;
+        });
+      }
+
+      for (const attempt of attempts) {
+        try {
+          const raw = await attempt();
+          const jsonMatch = raw.match(/\{[\s\S]*\}/);
+          if (!jsonMatch) {
+            console.warn("Scoring call returned no JSON object:", raw);
+            continue;
+          }
+          const parsed = JSON.parse(jsonMatch[0]);
+          const clamp = (n: unknown) =>
+            Math.max(0, Math.min(10, parseInt(String(n), 10) || 0));
+
+          return {
+            communication: clamp(parsed.communication),
+            clarity: clamp(parsed.clarity),
+            confidence: clamp(parsed.confidence),
+            overall: clamp(parsed.overall),
+          };
+        } catch (err) {
+          console.warn("Scoring call attempt failed:", err);
+        }
+      }
+
+      return null;
+    }
+
+    let scores: {
+      communication: number;
+      clarity: number;
+      confidence: number;
+      overall: number;
+    } | null = null;
+
+    if (feature === "interview" || feature === "communication") {
+      scores = await getScoresViaSeparateCall(cleaned);
+
+      const isAllZero =
+        scores &&
+        scores.communication === 0 &&
+        scores.clarity === 0 &&
+        scores.confidence === 0 &&
+        scores.overall === 0;
+
+      if (isAllZero) scores = null;
+
+      if (!scores) {
+        console.warn(
+          "getScoresViaSeparateCall: could not obtain a usable score for this turn.",
+        );
+      }
+    }
 
     /* ---------------------------------------------------
    SEND CLEAN RESPONSE
