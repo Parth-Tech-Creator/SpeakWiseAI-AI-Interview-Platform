@@ -85,6 +85,17 @@ export default function MockInterview() {
   const [interviewStarted, setInterviewStarted] = useState(false);
   const [pending, setPending] = useState(false);
 
+  // Score generation state
+  const [scoreStatus, setScoreStatus] = useState<
+    "idle" | "loading" | "done" | "error"
+  >("idle");
+  const [finalScores, setFinalScores] = useState<{
+    communication: number;
+    clarity: number;
+    confidence: number;
+    overall: number;
+  } | null>(null);
+
   const modeRef = useRef<InterviewMode | null>(null);
   const submitAnswerRef = useRef<(answer: string) => Promise<void>>(
     async () => { },
@@ -392,6 +403,40 @@ export default function MockInterview() {
     return cleaned;
   }
 
+  async function generateScore() {
+    if (!threadId) return;
+    setScoreStatus("loading");
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      const token = session?.access_token;
+      if (!token) throw new Error("Session expired.");
+
+      const response = await fetch(
+        "https://speakwiseai-ai-interview-platform.onrender.com/api/score",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ threadId, feature: "interview" }),
+        },
+      );
+
+      const data = await response.json();
+      if (!response.ok)
+        throw new Error(data.error || "Failed to generate score.");
+
+      setFinalScores(data.scores);
+      setScoreStatus("done");
+    } catch (err) {
+      console.error(err);
+      setScoreStatus("error");
+    }
+  }
+
   async function startInterview() {
     const currentMode = modeRef.current;
     if (!threadId || !currentMode) return;
@@ -519,6 +564,8 @@ export default function MockInterview() {
     questionNumberRef.current = 0;
     setInterviewStarted(false);
     setError("");
+    setScoreStatus("idle");
+    setFinalScores(null);
   }
 
   if (!threadId) {
@@ -764,12 +811,72 @@ export default function MockInterview() {
                 </div>
 
                 <div className="border-t border-gray-100 px-4 py-4 sm:px-6 sm:py-5 dark:border-gray-800">
-                  <button
-                    onClick={restart}
-                    className="mx-auto flex h-11 w-full max-w-xs items-center justify-center rounded-full bg-gradient-to-r from-violet-600 to-purple-500 px-6 text-sm font-medium text-white shadow-md shadow-violet-500/30 transition hover:opacity-90 active:scale-[0.99] sm:w-auto sm:px-8"
-                  >
-                    <RotateCcw className="mr-2 h-4 w-4" /> Try Again
-                  </button>
+                  {scoreStatus === "done" && finalScores ? (
+                    <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-center dark:border-gray-800 dark:bg-gray-800/40">
+                        <p className="text-lg font-bold text-violet-600 dark:text-violet-400">
+                          {finalScores.communication}/10
+                        </p>
+                        <p className="text-[11px] text-gray-500">
+                          Communication
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-center dark:border-gray-800 dark:bg-gray-800/40">
+                        <p className="text-lg font-bold text-violet-600 dark:text-violet-400">
+                          {finalScores.clarity}/10
+                        </p>
+                        <p className="text-[11px] text-gray-500">Clarity</p>
+                      </div>
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-center dark:border-gray-800 dark:bg-gray-800/40">
+                        <p className="text-lg font-bold text-violet-600 dark:text-violet-400">
+                          {finalScores.confidence}/10
+                        </p>
+                        <p className="text-[11px] text-gray-500">
+                          Confidence
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-gray-200 bg-gray-50 p-3 text-center dark:border-gray-800 dark:bg-gray-800/40">
+                        <p className="text-lg font-bold text-violet-600 dark:text-violet-400">
+                          {finalScores.overall}/10
+                        </p>
+                        <p className="text-[11px] text-gray-500">Overall</p>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {scoreStatus === "error" && (
+                    <p className="mb-3 text-center text-xs text-red-500">
+                      Couldn't generate your score. Please try again.
+                    </p>
+                  )}
+
+                  <div className="flex flex-col gap-2 sm:flex-row sm:justify-center">
+                    {scoreStatus !== "done" && (
+                      <button
+                        onClick={generateScore}
+                        disabled={scoreStatus === "loading"}
+                        className="mx-auto flex h-11 w-full max-w-xs items-center justify-center rounded-full bg-gradient-to-r from-violet-600 to-purple-500 px-6 text-sm font-medium text-white shadow-md shadow-violet-500/30 transition hover:opacity-90 active:scale-[0.99] disabled:opacity-50 sm:w-auto sm:px-8"
+                      >
+                        {scoreStatus === "loading" ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />{" "}
+                            Generating your score...
+                          </>
+                        ) : (
+                          <>
+                            <Trophy className="mr-2 h-4 w-4" /> Generate My
+                            Score
+                          </>
+                        )}
+                      </button>
+                    )}
+                    <button
+                      onClick={restart}
+                      className="mx-auto flex h-11 w-full max-w-xs items-center justify-center rounded-full border border-gray-300 px-6 text-sm font-medium text-gray-700 transition hover:bg-gray-50 active:scale-[0.99] dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800 sm:w-auto sm:px-8"
+                    >
+                      <RotateCcw className="mr-2 h-4 w-4" /> Try Again
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>

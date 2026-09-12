@@ -54,10 +54,35 @@ app.get("/api/health", (_req, res) => {
 function cleanAiResponse(text: string): string {
   let cleaned = text;
 
+  /*
+    Remove markdown table separator rows.
+
+    Example:
+
+    | -------- | -------- |
+
+    becomes nothing.
+  */
+
   cleaned = cleaned.replace(
     /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/gm,
     "",
   );
+
+  /*
+    Convert simple markdown table rows into
+    readable bullet-style text.
+
+    Example:
+
+    | Category | Roles | Description |
+
+    becomes:
+
+    Category
+    Roles
+    Description
+  */
 
   cleaned = cleaned.replace(/^\s*\|(.+)\|\s*$/gm, (_match, content: string) => {
     return content
@@ -67,9 +92,25 @@ function cleanAiResponse(text: string): string {
       .join(" — ");
   });
 
+  /*
+    Remove remaining pipes surrounded by spaces.
+
+    This handles malformed model output such as:
+
+    Category | Roles | Description
+  */
+
   cleaned = cleaned.replace(/\s+\|\s+/g, "\n");
 
+  /*
+    Remove excessive empty lines.
+  */
+
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
+
+  /*
+    Remove spaces before new lines.
+  */
 
   cleaned = cleaned.replace(/[ \t]+\n/g, "\n");
 
@@ -408,6 +449,14 @@ app.post("/api/chat", async (req, res) => {
 
     const baseSystemInstruction = systemPromptFor(feature as Feature, mode);
 
+    /*
+      COMMON RESPONSE STYLE
+
+      This is added to every provider so that
+      Gemini, Groq and Cerebras follow the same
+      response formatting rules.
+    */
+
     const responseStyleInstruction = `
 
 RESPONSE FORMAT RULES:
@@ -491,6 +540,7 @@ Output only the answer intended for the user.
       try {
         console.log(`Trying ${name}...`);
 
+        // Clear any partial response from a previous failed provider
         fullAiResponse = "";
         hasStartedStreaming = false;
 
@@ -502,6 +552,8 @@ Output only the answer intended for the user.
           temperature,
         });
 
+        // Collect the complete response first.
+        // Do NOT write to res here.
         for await (const chunk of result.textStream) {
           if (chunk && !hasStartedStreaming) {
             hasStartedStreaming = true;
@@ -514,6 +566,7 @@ Output only the answer intended for the user.
           }
         }
 
+        // Make sure the provider actually returned content
         if (!fullAiResponse.trim()) {
           throw new Error(`${name} returned an empty response.`);
         }
@@ -528,6 +581,13 @@ Output only the answer intended for the user.
 
         console.error(`${name} failed:`, error);
 
+        /*
+      Since nothing has been sent to the browser yet,
+      it is completely safe to try the next provider.
+
+      Remove any partial response from this failed provider.
+    */
+
         fullAiResponse = "";
         hasStartedStreaming = false;
 
@@ -541,6 +601,10 @@ Output only the answer intended for the user.
 
     let success = false;
 
+    /* ---------------------------------------------------
+       1. GEMINI
+    --------------------------------------------------- */
+
     if (process.env.GEMINI_API_KEY) {
       try {
         const gemini = createGeminiProvider(process.env.GEMINI_API_KEY);
@@ -553,6 +617,14 @@ Output only the answer intended for the user.
       }
     }
 
+    /* ---------------------------------------------------
+       2. GROQ FALLBACK
+
+       Only run if:
+       - Gemini failed
+       - Gemini did not send any text
+    --------------------------------------------------- */
+
     if (!success && !hasStartedStreaming && process.env.GROQ_API_KEY) {
       try {
         const groq = createGroqProvider(process.env.GROQ_API_KEY);
@@ -564,6 +636,15 @@ Output only the answer intended for the user.
         console.error("Groq initialization failed:", error);
       }
     }
+
+    /* ---------------------------------------------------
+       3. CEREBRAS FALLBACK
+
+       Only run if:
+       - Gemini failed
+       - Groq failed
+       - No provider has sent text yet
+    --------------------------------------------------- */
 
     if (!success && !hasStartedStreaming && process.env.CEREBRAS_API_KEY) {
       try {
@@ -584,12 +665,25 @@ Output only the answer intended for the user.
     if (!success) {
       console.error("All AI providers failed:", lastError);
 
+      /*
+        No provider started sending text.
+
+        Safe to return a normal JSON error.
+      */
+
       if (!hasStartedStreaming) {
         return res.status(503).json({
           error:
             "All AI providers are temporarily unavailable. Please try again.",
         });
       }
+
+      /*
+        A provider started streaming and then failed.
+
+        We cannot send another provider's response.
+        Simply close the stream.
+      */
 
       if (!res.writableEnded) {
         res.end();
@@ -650,11 +744,21 @@ Output only the answer intended for the user.
   } catch (error) {
     console.error("Chat API error:", error);
 
+    /*
+      If nothing has been sent yet,
+      return a proper error response.
+    */
+
     if (!res.headersSent) {
       return res.status(500).json({
         error: error instanceof Error ? error.message : "Something went wrong.",
       });
     }
+
+    /*
+      If streaming already started,
+      close the response safely.
+    */
 
     if (!res.writableEnded) {
       res.end();
