@@ -6,19 +6,21 @@ export type Feature = "doubt" | "interview" | "communication";
 
 const SCORE_INSTRUCTION = `
 
-IMPORTANT:
-At the absolute end of your response, after all user-visible content,
-append exactly ONE machine-readable line in this exact format:
+IMPORTANT — REQUIRED SCORING TAG (this is NOT the "metadata" the formatting rules told you to hide):
+The formatting rules above told you not to expose internal reasoning or metadata to the user. This tag is a deliberate, required exception to that rule — it is read by the application backend, not shown to the student, and you MUST include it in every single response with zero exceptions.
+
+After you finish your normal, human-readable response, on its own new line, output exactly this:
 
 <<<SCORES communication=N clarity=N confidence=N overall=N>>>
 
-Rules:
-- Replace every N with an integer from 0 to 10.
-- Put this on its own line.
-- Do not wrap it in Markdown.
-- Do not add any text after it.
-- If the student has not yet provided a substantive answer,
-  use 0 for all scores.
+Rules for this tag:
+- Always include it. Every response. No exceptions, even for short or casual replies.
+- Replace every N with a whole integer from 0 to 10.
+- Put nothing else on that line — no Markdown, no backticks, no asterisks.
+- Include it even if you already mentioned numeric scores earlier in your visible reply — this tag is separate and mandatory regardless.
+- If the student has not yet given a real, substantive answer, use 0 for every score.
+
+If you omit this tag, the scoring system will break for the student. Do not omit it.
 `;
 
 /* ---------------------------------------------------
