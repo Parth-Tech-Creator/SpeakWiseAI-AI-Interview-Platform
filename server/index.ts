@@ -54,35 +54,10 @@ app.get("/api/health", (_req, res) => {
 function cleanAiResponse(text: string): string {
   let cleaned = text;
 
-  /*
-    Remove markdown table separator rows.
-
-    Example:
-
-    | -------- | -------- |
-
-    becomes nothing.
-  */
-
   cleaned = cleaned.replace(
     /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/gm,
     "",
   );
-
-  /*
-    Convert simple markdown table rows into
-    readable bullet-style text.
-
-    Example:
-
-    | Category | Roles | Description |
-
-    becomes:
-
-    Category
-    Roles
-    Description
-  */
 
   cleaned = cleaned.replace(/^\s*\|(.+)\|\s*$/gm, (_match, content: string) => {
     return content
@@ -92,30 +67,207 @@ function cleanAiResponse(text: string): string {
       .join(" — ");
   });
 
-  /*
-    Remove remaining pipes surrounded by spaces.
-
-    This handles malformed model output such as:
-
-    Category | Roles | Description
-  */
-
   cleaned = cleaned.replace(/\s+\|\s+/g, "\n");
 
-  /*
-    Remove excessive empty lines.
-  */
-
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n");
-
-  /*
-    Remove spaces before new lines.
-  */
 
   cleaned = cleaned.replace(/[ \t]+\n/g, "\n");
 
   return cleaned.trim();
 }
+
+/* =======================================================
+   SCORE FROM FULL TRANSCRIPT (used by /api/score)
+======================================================= */
+
+async function getScoresFromTranscript(transcript: string): Promise<{
+  communication: number;
+  clarity: number;
+  confidence: number;
+  overall: number;
+} | null> {
+  const scoringPrompt = `Below is a full transcript of a mock interview or communication practice session between a student and an AI coach.
+
+"""
+${transcript}
+"""
+
+Based on the student's answers across the WHOLE session, output a single JSON object with four integer scores from 0 to 10 reflecting their overall performance: communication, clarity, confidence, overall. Output ONLY the JSON object, nothing else, no markdown, no code fences.`;
+
+  const attempts: Array<() => Promise<string>> = [];
+
+  if (process.env.GEMINI_API_KEY) {
+    const gemini = createGeminiProvider(process.env.GEMINI_API_KEY);
+    attempts.push(async () => {
+      const { text } = await generateText({
+        model: gemini("gemini-3.6-flash"),
+        prompt: scoringPrompt,
+        temperature: 0.1,
+      });
+      return text;
+    });
+  }
+
+  if (process.env.GROQ_API_KEY) {
+    const groq = createGroqProvider(process.env.GROQ_API_KEY);
+    attempts.push(async () => {
+      const { text } = await generateText({
+        model: groq("openai/gpt-oss-20b"),
+        prompt: scoringPrompt,
+        temperature: 0.1,
+      });
+      return text;
+    });
+  }
+
+  if (process.env.CEREBRAS_API_KEY) {
+    const cerebras = createCerebrasProvider(process.env.CEREBRAS_API_KEY);
+    attempts.push(async () => {
+      const { text } = await generateText({
+        model: cerebras("gpt-oss-120b"),
+        prompt: scoringPrompt,
+        temperature: 0.1,
+      });
+      return text;
+    });
+  }
+
+  for (const attempt of attempts) {
+    try {
+      const raw = await attempt();
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        console.warn("Scoring call returned no JSON object:", raw);
+        continue;
+      }
+      const parsed = JSON.parse(jsonMatch[0]);
+      const clamp = (n: unknown) =>
+        Math.max(0, Math.min(10, parseInt(String(n), 10) || 0));
+
+      return {
+        communication: clamp(parsed.communication),
+        clarity: clamp(parsed.clarity),
+        confidence: clamp(parsed.confidence),
+        overall: clamp(parsed.overall),
+      };
+    } catch (err) {
+      console.warn("Scoring call attempt failed:", err);
+    }
+  }
+
+  return null;
+}
+
+/* =======================================================
+   SCORE API — explicit, button-triggered scoring
+======================================================= */
+
+app.post("/api/score", async (req, res) => {
+  try {
+    const { threadId, feature } = req.body;
+
+    if (!threadId || !feature) {
+      return res.status(400).json({
+        error: "threadId and feature are required.",
+      });
+    }
+
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Unauthorized." });
+    }
+
+    const token = authHeader.slice(7);
+
+    const SUPABASE_URL = process.env.SUPABASE_URL;
+    const SUPABASE_PUBLISHABLE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY;
+
+    if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
+      throw new Error("Supabase configuration is missing.");
+    }
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+      global: {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      },
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+      },
+    });
+
+    const { data: userData, error: userError } =
+      await supabase.auth.getUser(token);
+
+    if (userError || !userData.user) {
+      return res.status(401).json({ error: "Unauthorized." });
+    }
+
+    const { data: threadMessages, error: messagesError } = await supabase
+      .from("messages")
+      .select("role, content")
+      .eq("thread_id", threadId)
+      .order("created_at", { ascending: true });
+
+    if (messagesError) {
+      console.error("Failed to fetch messages for scoring:", messagesError);
+      return res.status(500).json({
+        error: "Could not load session transcript.",
+      });
+    }
+
+    const transcript = (threadMessages ?? [])
+      .map(
+        (m) =>
+          `${m.role === "user" ? "Student" : "Coach"}: ${m.content}`,
+      )
+      .join("\n\n");
+
+    if (!transcript.trim()) {
+      return res.status(400).json({
+        error: "No conversation found to score.",
+      });
+    }
+
+    const scores = await getScoresFromTranscript(transcript);
+
+    if (!scores) {
+      return res.status(502).json({
+        error: "Could not generate a score right now. Please try again.",
+      });
+    }
+
+    const { error: scoreError } = await supabase
+      .from("session_scores")
+      .insert({
+        user_id: userData.user.id,
+        thread_id: threadId,
+        feature,
+        communication_score: scores.communication,
+        clarity_score: scores.clarity,
+        confidence_score: scores.confidence,
+        overall_score: scores.overall,
+      });
+
+    if (scoreError) {
+      console.error("Failed to save scores:", scoreError);
+      return res.status(500).json({
+        error: "Score generated but failed to save.",
+      });
+    }
+
+    return res.json({ scores });
+  } catch (error) {
+    console.error("Score API error:", error);
+    return res.status(500).json({
+      error:
+        error instanceof Error ? error.message : "Something went wrong.",
+    });
+  }
+});
 
 /* =======================================================
    CHAT API
@@ -256,14 +408,6 @@ app.post("/api/chat", async (req, res) => {
 
     const baseSystemInstruction = systemPromptFor(feature as Feature, mode);
 
-    /*
-      COMMON RESPONSE STYLE
-
-      This is added to every provider so that
-      Gemini, Groq and Cerebras follow the same
-      response formatting rules.
-    */
-
     const responseStyleInstruction = `
 
 RESPONSE FORMAT RULES:
@@ -347,7 +491,6 @@ Output only the answer intended for the user.
       try {
         console.log(`Trying ${name}...`);
 
-        // Clear any partial response from a previous failed provider
         fullAiResponse = "";
         hasStartedStreaming = false;
 
@@ -359,8 +502,6 @@ Output only the answer intended for the user.
           temperature,
         });
 
-        // Collect the complete response first.
-        // Do NOT write to res here.
         for await (const chunk of result.textStream) {
           if (chunk && !hasStartedStreaming) {
             hasStartedStreaming = true;
@@ -373,7 +514,6 @@ Output only the answer intended for the user.
           }
         }
 
-        // Make sure the provider actually returned content
         if (!fullAiResponse.trim()) {
           throw new Error(`${name} returned an empty response.`);
         }
@@ -388,13 +528,6 @@ Output only the answer intended for the user.
 
         console.error(`${name} failed:`, error);
 
-        /*
-      Since nothing has been sent to the browser yet,
-      it is completely safe to try the next provider.
-
-      Remove any partial response from this failed provider.
-    */
-
         fullAiResponse = "";
         hasStartedStreaming = false;
 
@@ -408,10 +541,6 @@ Output only the answer intended for the user.
 
     let success = false;
 
-    /* ---------------------------------------------------
-       1. GEMINI
-    --------------------------------------------------- */
-
     if (process.env.GEMINI_API_KEY) {
       try {
         const gemini = createGeminiProvider(process.env.GEMINI_API_KEY);
@@ -424,14 +553,6 @@ Output only the answer intended for the user.
       }
     }
 
-    /* ---------------------------------------------------
-       2. GROQ FALLBACK
-
-       Only run if:
-       - Gemini failed
-       - Gemini did not send any text
-    --------------------------------------------------- */
-
     if (!success && !hasStartedStreaming && process.env.GROQ_API_KEY) {
       try {
         const groq = createGroqProvider(process.env.GROQ_API_KEY);
@@ -443,15 +564,6 @@ Output only the answer intended for the user.
         console.error("Groq initialization failed:", error);
       }
     }
-
-    /* ---------------------------------------------------
-       3. CEREBRAS FALLBACK
-
-       Only run if:
-       - Gemini failed
-       - Groq failed
-       - No provider has sent text yet
-    --------------------------------------------------- */
 
     if (!success && !hasStartedStreaming && process.env.CEREBRAS_API_KEY) {
       try {
@@ -472,25 +584,12 @@ Output only the answer intended for the user.
     if (!success) {
       console.error("All AI providers failed:", lastError);
 
-      /*
-        No provider started sending text.
-
-        Safe to return a normal JSON error.
-      */
-
       if (!hasStartedStreaming) {
         return res.status(503).json({
           error:
             "All AI providers are temporarily unavailable. Please try again.",
         });
       }
-
-      /*
-        A provider started streaming and then failed.
-
-        We cannot send another provider's response.
-        Simply close the stream.
-      */
 
       if (!res.writableEnded) {
         res.end();
@@ -511,120 +610,7 @@ Output only the answer intended for the user.
 
     const cleanedAiResponse = cleanAiResponse(fullAiResponse);
 
-        /* ---------------------------------------------------
-   CLEAN RESPONSE (no hidden tag anymore, just trim)
---------------------------------------------------- */
-
     const cleaned = cleanedAiResponse.trim();
-
-    /* ---------------------------------------------------
-   SCORE VIA A SEPARATE, DEDICATED CALL
-   (feature === "interview" | "communication" only)
---------------------------------------------------- */
-
-    async function getScoresViaSeparateCall(feedbackText: string): Promise<{
-      communication: number;
-      clarity: number;
-      confidence: number;
-      overall: number;
-    } | null> {
-      const scoringPrompt = `A coach wrote this feedback for a student's spoken answer:
-
-"""
-${feedbackText}
-"""
-
-Based only on this feedback, output a single JSON object with four integer scores from 0 to 10: communication, clarity, confidence, overall. If the feedback indicates the student gave no real answer yet, use 0 for all four. Output ONLY the JSON object, nothing else, no markdown, no code fences.`;
-
-      const attempts: Array<() => Promise<string>> = [];
-
-      if (process.env.GEMINI_API_KEY) {
-        const gemini = createGeminiProvider(process.env.GEMINI_API_KEY);
-        attempts.push(async () => {
-          const { text } = await generateText({
-            model: gemini("gemini-3.6-flash"),
-            prompt: scoringPrompt,
-            temperature: 0.1,
-          });
-          return text;
-        });
-      }
-
-      if (process.env.GROQ_API_KEY) {
-        const groq = createGroqProvider(process.env.GROQ_API_KEY);
-        attempts.push(async () => {
-          const { text } = await generateText({
-            model: groq("openai/gpt-oss-20b"),
-            prompt: scoringPrompt,
-            temperature: 0.1,
-          });
-          return text;
-        });
-      }
-
-      if (process.env.CEREBRAS_API_KEY) {
-        const cerebras = createCerebrasProvider(process.env.CEREBRAS_API_KEY);
-        attempts.push(async () => {
-          const { text } = await generateText({
-            model: cerebras("gpt-oss-120b"),
-            prompt: scoringPrompt,
-            temperature: 0.1,
-          });
-          return text;
-        });
-      }
-
-      for (const attempt of attempts) {
-        try {
-          const raw = await attempt();
-          const jsonMatch = raw.match(/\{[\s\S]*\}/);
-          if (!jsonMatch) {
-            console.warn("Scoring call returned no JSON object:", raw);
-            continue;
-          }
-          const parsed = JSON.parse(jsonMatch[0]);
-          const clamp = (n: unknown) =>
-            Math.max(0, Math.min(10, parseInt(String(n), 10) || 0));
-
-          return {
-            communication: clamp(parsed.communication),
-            clarity: clamp(parsed.clarity),
-            confidence: clamp(parsed.confidence),
-            overall: clamp(parsed.overall),
-          };
-        } catch (err) {
-          console.warn("Scoring call attempt failed:", err);
-        }
-      }
-
-      return null;
-    }
-
-    let scores: {
-      communication: number;
-      clarity: number;
-      confidence: number;
-      overall: number;
-    } | null = null;
-
-    if (feature === "interview" || feature === "communication") {
-      scores = await getScoresViaSeparateCall(cleaned);
-
-      const isAllZero =
-        scores &&
-        scores.communication === 0 &&
-        scores.clarity === 0 &&
-        scores.confidence === 0 &&
-        scores.overall === 0;
-
-      if (isAllZero) scores = null;
-
-      if (!scores) {
-        console.warn(
-          "getScoresViaSeparateCall: could not obtain a usable score for this turn.",
-        );
-      }
-    }
 
     /* ---------------------------------------------------
    SEND CLEAN RESPONSE
@@ -648,28 +634,6 @@ Based only on this feedback, output a single JSON object with four integer score
     }
 
     /* ===================================================
-       SAVE SCORES
-    =================================================== */
-
-    if (scores) {
-      const { error: scoreError } = await supabase
-        .from("session_scores")
-        .insert({
-          user_id: userData.user.id,
-          thread_id: threadId,
-          feature,
-          communication_score: scores.communication,
-          clarity_score: scores.clarity,
-          confidence_score: scores.confidence,
-          overall_score: scores.overall,
-        });
-
-      if (scoreError) {
-        console.error("Failed to save scores:", scoreError);
-      }
-    }
-
-    /* ===================================================
        UPDATE THREAD
     =================================================== */
 
@@ -686,21 +650,11 @@ Based only on this feedback, output a single JSON object with four integer score
   } catch (error) {
     console.error("Chat API error:", error);
 
-    /*
-      If nothing has been sent yet,
-      return a proper error response.
-    */
-
     if (!res.headersSent) {
       return res.status(500).json({
         error: error instanceof Error ? error.message : "Something went wrong.",
       });
     }
-
-    /*
-      If streaming already started,
-      close the response safely.
-    */
 
     if (!res.writableEnded) {
       res.end();
@@ -713,5 +667,5 @@ Based only on this feedback, output a single JSON object with four integer score
 ======================================================= */
 
 app.listen(PORT, () => {
-  console.log(`SpeakWise AI server running on http://localhost:${PORT}`);
+  console.log(`SpeakWise AI server running on port ${PORT}`);
 });

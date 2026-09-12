@@ -1,29 +1,6 @@
 export type Feature = "doubt" | "interview" | "communication";
 
 /* ---------------------------------------------------
-   SCORE INSTRUCTION
---------------------------------------------------- */
-
-const SCORE_INSTRUCTION = `
-
-IMPORTANT — REQUIRED SCORING TAG (this is NOT the "metadata" the formatting rules told you to hide):
-The formatting rules above told you not to expose internal reasoning or metadata to the user. This tag is a deliberate, required exception to that rule — it is read by the application backend, not shown to the student, and you MUST include it in every single response with zero exceptions.
-
-After you finish your normal, human-readable response, on its own new line, output exactly this:
-
-<<<SCORES communication=N clarity=N confidence=N overall=N>>>
-
-Rules for this tag:
-- Always include it. Every response. No exceptions, even for short or casual replies.
-- Replace every N with a whole integer from 0 to 10.
-- Put nothing else on that line — no Markdown, no backticks, no asterisks.
-- Include it even if you already mentioned numeric scores earlier in your visible reply — this tag is separate and mandatory regardless.
-- If the student has not yet given a real, substantive answer, use 0 for every score.
-
-If you omit this tag, the scoring system will break for the student. Do not omit it.
-`;
-
-/* ---------------------------------------------------
    COMMON RESPONSE FORMAT RULES
 --------------------------------------------------- */
 
@@ -306,15 +283,14 @@ Then ask exactly ONE next interview question.
 `;
     }
 
-    return body + SCORE_INSTRUCTION;
+    return body;
   }
 
   /* ===================================================
      COMMUNICATION PRACTICE
   =================================================== */
 
-  return (
-    `
+  return `
 You are SpeakWise AI, a supportive communication coach.
 
 The student is practicing communication skills through topics such as:
@@ -357,16 +333,11 @@ Keep the tone warm, supportive, and encouraging.
 Do not use "|" characters as separators.
 Do not create tables unless explicitly requested.
 Do not make the response unnecessarily long.
-` + SCORE_INSTRUCTION
-  );
+`;
 }
 
 /* ---------------------------------------------------
-   SCORE REGEX
---------------------------------------------------- */
-
-/* ---------------------------------------------------
-   SCORE BLOCK MATCHER (loose on formatting inside)
+   SCORE BLOCK MATCHER (kept for compatibility, unused by index.ts anymore)
 --------------------------------------------------- */
 
 const SCORE_BLOCK_REGEX = /<<<SCORES[\s\S]*?>>>/i;
@@ -393,9 +364,6 @@ export function extractScores(text: string): {
   const blockMatch = text.match(SCORE_BLOCK_REGEX);
 
   if (!blockMatch) {
-    console.warn(
-      "extractScores: no <<<SCORES ...>>> block found in AI response.",
-    );
     return {
       cleaned: text.trim(),
       scores: null,
@@ -416,10 +384,6 @@ export function extractScores(text: string): {
     confidence === null ||
     overall === null
   ) {
-    console.warn(
-      "extractScores: found a SCORES block but couldn't parse all four numbers:",
-      block,
-    );
     return {
       cleaned,
       scores: null,
@@ -428,11 +392,6 @@ export function extractScores(text: string): {
 
   const scores = { communication, clarity, confidence, overall };
 
-  /*
-    If the model returns all zeros,
-    it means the student has not yet
-    provided an answer to evaluate.
-  */
   if (
     scores.communication === 0 &&
     scores.clarity === 0 &&
