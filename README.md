@@ -2,7 +2,7 @@
 
 An AI-powered learning companion for students — solve academic doubts, practice mock interviews, and improve spoken communication skills, all with real-time AI feedback and a personal performance dashboard.
 
-**Live site:** https://speakwiseai-ai-interview-platform.vercel.app
+**Live site:** https://speak-wise-ai-ai-interview-platform.vercel.app/
 **Backend API:** https://speakwiseai-ai-interview-platform.onrender.com
 
 ---
